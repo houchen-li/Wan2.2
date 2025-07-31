@@ -19,6 +19,7 @@ try:
     import torch_musa
     FLASH_ATTN_2_AVAILABLE = False
     FLASH_ATTN_3_AVAILABLE = False
+    torch.backends.mudnn.allow_tf32 = True
 except ModuleNotFoundError:
     torch_musa = None
 
