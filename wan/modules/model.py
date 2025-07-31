@@ -12,6 +12,7 @@ from wan.utils.platform import get_device_type
 try:
     import torch_musa
     from wan.modules.attention import attention as flash_attention
+    torch.backends.mudnn.allow_tf32 = True
 except ModuleNotFoundError:
     torch_musa = None
 
@@ -474,6 +475,7 @@ class WanModel(ModelMixin, ConfigMixin):
         # embeddings
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
+        self.patch_embedding = self.patch_embedding.to(memory_format=torch.channels_last_3d)
         self.text_embedding = nn.Sequential(
             nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
             nn.Linear(dim, dim))
