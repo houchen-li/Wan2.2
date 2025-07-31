@@ -2,12 +2,14 @@
 import torch
 import torch.distributed as dist
 
+from wan.utils.platform import get_torch_distributed_backend
+
 
 def init_distributed_group():
     """r initialize sequence parallel group.
     """
     if not dist.is_initialized():
-        dist.init_process_group(backend='nccl')
+        dist.init_process_group(backend=get_torch_distributed_backend())
 
 
 def get_rank():

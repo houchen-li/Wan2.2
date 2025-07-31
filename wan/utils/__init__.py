@@ -5,8 +5,10 @@ from .fm_solvers import (
     retrieve_timesteps,
 )
 from .fm_solvers_unipc import FlowUniPCMultistepScheduler
+from .platform import get_device, get_device_type, get_torch_distributed_backend
 
 __all__ = [
     'HuggingfaceTokenizer', 'get_sampling_sigmas', 'retrieve_timesteps',
-    'FlowDPMSolverMultistepScheduler', 'FlowUniPCMultistepScheduler'
+    'FlowDPMSolverMultistepScheduler', 'FlowUniPCMultistepScheduler',
+    'get_device', 'get_device_type', 'get_torch_distributed_backend'
 ]
