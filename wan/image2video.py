@@ -21,6 +21,7 @@ try:
     import torch_musa.core.amp as amp
     from torch_musa.core.device import synchronize
     from torch_musa.core.memory import empty_cache
+    torch.backends.mudnn.allow_tf32 = True
 except ModuleNotFoundError:
     torch_musa = None
 
@@ -37,7 +38,7 @@ from wan.utils.fm_solvers import (
 )
 from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from wan.utils.platform import get_device, get_device_type
-
+from wan.utils.memory_format import convert_conv3d_weight_memory_format
 
 class WanI2V:
 
@@ -108,6 +109,7 @@ class WanI2V:
         self.vae = Wan2_1_VAE(
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
             device=self.device)
+        convert_conv3d_weight_memory_format(self.vae.model, memory_format=torch.channels_last_3d)
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         self.low_noise_model = WanModel.from_pretrained(
