@@ -2,9 +2,14 @@
 import torch
 import torch.distributed as dist
 
-from ..modules.attention import flash_attention
-from .util import all_to_all
+from wan.modules.attention import flash_attention
+from wan.distributed.util import all_to_all
 
+try:
+    import torch_musa
+    from wan.modules.attention import attention as flash_attention
+except ModuleNotFoundError:
+    torch_musa = None
 
 def distributed_attention(
         q,

@@ -6,7 +6,14 @@ import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
-from .attention import flash_attention
+from wan.modules.attention import flash_attention
+from wan.utils.platform import get_device_type
+
+try:
+    import torch_musa
+    from wan.modules.attention import attention as flash_attention
+except ModuleNotFoundError:
+    torch_musa = None
 
 __all__ = ['WanModel']
 
@@ -15,7 +22,7 @@ def sinusoidal_embedding_1d(dim, position):
     # preprocess
     assert dim % 2 == 0
     half = dim // 2
-    position = position.type(torch.float64)
+    position = position.type(torch.float32)
 
     # calculation
     sinusoid = torch.outer(
@@ -24,18 +31,53 @@ def sinusoidal_embedding_1d(dim, position):
     return x
 
 
-@torch.amp.autocast('cuda', enabled=False)
-def rope_params(max_seq_len, dim, theta=10000):
+@torch.amp.autocast(get_device_type(), enabled=False)
+def rope_params(
+    max_seq_len, dim, theta=10000, dtype=torch.float32, device=torch.device("cpu")
+):
     assert dim % 2 == 0
     freqs = torch.outer(
-        torch.arange(max_seq_len),
-        1.0 / torch.pow(theta,
-                        torch.arange(0, dim, 2).to(torch.float64).div(dim)))
+        torch.arange(max_seq_len, dtype=dtype, device=device),
+        1.0
+        / torch.pow(
+            theta, torch.arange(0, dim, 2, dtype=dtype, device=device).div(dim)
+        ),
+    )
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
 
 
-@torch.amp.autocast('cuda', enabled=False)
+@torch.amp.autocast(get_device_type(), enabled=False)
+def rope_params_real(
+    max_seq_len, dim, theta=10000, dtype=torch.float32, device=torch.device("cpu")
+):
+    assert dim % 2 == 0
+    freqs_real = torch.outer(
+        torch.arange(max_seq_len, dtype=dtype, device=device),
+        1.0
+        / torch.pow(
+            theta, torch.arange(0, dim, 2, dtype=dtype, device=device).div(dim)
+        ),
+    )
+    return torch.cos(freqs_real)
+
+
+@torch.amp.autocast(get_device_type(), enabled=False)
+def rope_params_imag(
+    max_seq_len, dim, theta=10000, dtype=torch.float32, device=torch.device("cpu")
+):
+    assert dim % 2 == 0
+    freqs_imag = torch.outer(
+        torch.arange(max_seq_len, dtype=dtype, device=device),
+        1.0
+        / torch.pow(
+            theta, torch.arange(0, dim, 2, dtype=dtype, device=device).div(dim)
+        ),
+    )
+    return torch.sin(freqs_imag)
+
+
+@torch.amp.autocast(get_device_type(), enabled=False)
 def rope_apply(x, grid_sizes, freqs):
     n, c = x.size(2), x.size(3) // 2
 
@@ -64,6 +106,55 @@ def rope_apply(x, grid_sizes, freqs):
         # append to collection
         output.append(x_i)
     return torch.stack(output).float()
+
+
+@torch.amp.autocast(get_device_type(), enabled=False)
+def rope_apply_musa(x, grid_sizes, freqs):
+    n, c = x.size(2), x.size(3) // 2
+    c0 = c - 2 * (c // 3)
+    c1 = c // 3
+    c2 = c // 3
+
+    # split freqs
+    freqs_real = freqs[0].split([c0, c1, c2], dim=1)
+    freqs_imag = freqs[-1].split([c0, c1, c2], dim=1)
+
+    # loop over samples
+    output = []
+    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+        seq_len = f * h * w
+
+        # precompute multipliers
+        x_i = x[i, :seq_len].reshape(seq_len, n, c, 2)
+        x_real = x_i[..., 0]
+        x_imag = x_i[..., 1]
+        freqs_real = torch.cat(
+            [
+                freqs_real[0][:f].view(f, 1, 1, c0).expand(f, h, w, c0),
+                freqs_real[1][:h].view(1, h, 1, c1).expand(f, h, w, c1),
+                freqs_real[2][:w].view(1, 1, w, c2).expand(f, h, w, c2),
+            ],
+            dim=-1,
+        ).reshape(seq_len, 1, c)
+        freqs_imag = torch.cat(
+            [
+                freqs_imag[0][:f].view(f, 1, 1, c0).expand(f, h, w, c0),
+                freqs_imag[1][:h].view(1, h, 1, c1).expand(f, h, w, c1),
+                freqs_imag[2][:w].view(1, 1, w, c2).expand(f, h, w, c2),
+            ],
+            dim=-1,
+        ).reshape(seq_len, 1, c)
+
+        out_real = x_real * freqs_real - x_imag * freqs_imag
+        out_imag = x_real * freqs_imag + x_imag * freqs_real
+
+        # apply rotary embedding
+        x_out = torch.stack([out_real, out_imag], dim=-1).flatten(2)
+        x_out = torch.cat([x_out, x[i, seq_len:]], dim=0)
+
+        # append to collection
+        output.append(x_out)
+    return torch.stack(output)
 
 
 class WanRMSNorm(nn.Module):
@@ -141,10 +232,16 @@ class WanSelfAttention(nn.Module):
             return q, k, v
 
         q, k, v = qkv_fn(x)
+        if torch_musa is None:
+            q = rope_apply(q, grid_sizes, freqs)
+            k = rope_apply(k, grid_sizes, freqs)
+        else:
+            q = rope_apply_musa(q, grid_sizes, freqs)
+            k = rope_apply_musa(k, grid_sizes, freqs)
 
         x = flash_attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
+            q=q,
+            k=k,
             v=v,
             k_lens=seq_lens,
             window_size=self.window_size)
@@ -235,7 +332,7 @@ class WanAttentionBlock(nn.Module):
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
         assert e.dtype == torch.float32
-        with torch.amp.autocast('cuda', dtype=torch.float32):
+        with torch.amp.autocast(get_device_type(), dtype=torch.float32):
             e = (self.modulation.unsqueeze(0) + e).chunk(6, dim=2)
         assert e[0].dtype == torch.float32
 
@@ -243,7 +340,7 @@ class WanAttentionBlock(nn.Module):
         y = self.self_attn(
             self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
             seq_lens, grid_sizes, freqs)
-        with torch.amp.autocast('cuda', dtype=torch.float32):
+        with torch.amp.autocast(get_device_type(), dtype=torch.float32):
             x = x + y * e[2].squeeze(2)
 
         # cross-attention & ffn function
@@ -251,7 +348,7 @@ class WanAttentionBlock(nn.Module):
             x = x + self.cross_attn(self.norm3(x), context, context_lens)
             y = self.ffn(
                 self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
-            with torch.amp.autocast('cuda', dtype=torch.float32):
+            with torch.amp.autocast(get_device_type(), dtype=torch.float32):
                 x = x + y * e[5].squeeze(2)
             return x
 
@@ -283,7 +380,7 @@ class Head(nn.Module):
             e(Tensor): Shape [B, L1, C]
         """
         assert e.dtype == torch.float32
-        with torch.amp.autocast('cuda', dtype=torch.float32):
+        with torch.amp.autocast(get_device_type(), dtype=torch.float32):
             e = (self.modulation.unsqueeze(0) + e.unsqueeze(2)).chunk(2, dim=2)
             x = (
                 self.head(
@@ -397,12 +494,33 @@ class WanModel(ModelMixin, ConfigMixin):
         # buffers (don't use register_buffer otherwise dtype will be changed in to())
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
         d = dim // num_heads
-        self.freqs = torch.cat([
-            rope_params(1024, d - 4 * (d // 6)),
-            rope_params(1024, 2 * (d // 6)),
-            rope_params(1024, 2 * (d // 6))
-        ],
-                               dim=1)
+        if torch_musa is None:
+            self.freqs = torch.cat(
+                [
+                    rope_params(1024, d - 4 * (d // 6)),
+                    rope_params(1024, 2 * (d // 6)),
+                    rope_params(1024, 2 * (d // 6)),
+                ],
+                dim=1,
+            )
+        else:
+            freqs_real = torch.cat(
+                [
+                    rope_params_real(1024, d - 4 * (d // 6)),
+                    rope_params_real(1024, 2 * (d // 6)),
+                    rope_params_real(1024, 2 * (d // 6)),
+                ],
+                dim=1,
+            )
+            freqs_imag = torch.cat(
+                [
+                    rope_params_imag(1024, d - 4 * (d // 6)),
+                    rope_params_imag(1024, 2 * (d // 6)),
+                    rope_params_imag(1024, 2 * (d // 6)),
+                ],
+                dim=1,
+            )
+            self.freqs = (freqs_real, freqs_imag)
 
         # initialize weights
         self.init_weights()
@@ -437,9 +555,17 @@ class WanModel(ModelMixin, ConfigMixin):
         if self.model_type == 'i2v':
             assert y is not None
         # params
+        dtype = self.patch_embedding.weight.dtype
         device = self.patch_embedding.weight.device
-        if self.freqs.device != device:
-            self.freqs = self.freqs.to(device)
+        if torch_musa is None:
+            if self.freqs.dtype != dtype or self.freqs.device != device:
+                self.freqs = self.freqs.to(dtype=dtype, device=device)
+        else:
+            if self.freqs[0].dtype != dtype or self.freqs[0].device != device:
+                self.freqs = (
+                    self.freqs[0].to(dtype=dtype, device=device),
+                    self.freqs[-1].to(dtype=dtype, device=device)
+                )
 
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
@@ -459,7 +585,7 @@ class WanModel(ModelMixin, ConfigMixin):
         # time embeddings
         if t.dim() == 1:
             t = t.expand(t.size(0), seq_len)
-        with torch.amp.autocast('cuda', dtype=torch.float32):
+        with torch.amp.autocast(get_device_type(), dtype=torch.float32):
             bt = t.size(0)
             t = t.flatten()
             e = self.time_embedding(

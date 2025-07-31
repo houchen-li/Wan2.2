@@ -5,6 +5,7 @@ import os
 import sys
 import warnings
 from datetime import datetime
+from time import perf_counter
 
 warnings.filterwarnings('ignore')
 
@@ -12,13 +13,21 @@ import random
 
 import torch
 import torch.distributed as dist
+from torch.cuda import set_device, synchronize
 from PIL import Image
+
+try:
+    import torch_musa
+    from torch_musa.core.device import set_device, synchronize
+except ModuleNotFoundError:
+    torch_musa = None
 
 import wan
 from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CONFIGS
 from wan.distributed.util import init_distributed_group
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import save_video, str2bool
+from wan.utils.platform import get_torch_distributed_backend
 
 EXAMPLE_PROMPT = {
     "t2v-A14B": {
@@ -225,9 +234,9 @@ def generate(args):
         logging.info(
             f"offload_model is not specified, set to {args.offload_model}.")
     if world_size > 1:
-        torch.cuda.set_device(local_rank)
+        set_device(local_rank)
         dist.init_process_group(
-            backend="nccl",
+            backend=get_torch_distributed_backend(),
             init_method="env://",
             rank=rank,
             world_size=world_size)
@@ -398,9 +407,9 @@ def generate(args):
             value_range=(-1, 1))
     del video
 
-    torch.cuda.synchronize()
+    synchronize()
     if dist.is_initialized():
-        dist.barrier()
+        # dist.barrier() # FIXME
         dist.destroy_process_group()
 
     logging.info("Finished.")
@@ -408,4 +417,7 @@ def generate(args):
 
 if __name__ == "__main__":
     args = _parse_args()
+    start_time = perf_counter()
     generate(args)
+    end_time = perf_counter()
+    logging.info(f"Task running took {end_time-start_time:.2f} seconds.")

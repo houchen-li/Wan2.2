@@ -2,10 +2,11 @@
 import logging
 
 import torch
-import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+
+from wan.utils.platform import get_device_type
 
 __all__ = [
     "Wan2_2_VAE",
@@ -895,7 +896,7 @@ class Wan2_2_VAE:
         dim_mult=[1, 2, 4, 4],
         temperal_downsample=[False, True, True],
         dtype=torch.float,
-        device="cuda",
+        device=get_device_type(),
     ):
 
         self.dtype = dtype
@@ -1025,7 +1026,7 @@ class Wan2_2_VAE:
         try:
             if not isinstance(videos, list):
                 raise TypeError("videos should be a list")
-            with amp.autocast(dtype=self.dtype):
+            with torch.amp.autocast(get_device_type(), dtype=self.dtype):
                 return [
                     self.model.encode(u.unsqueeze(0),
                                       self.scale).float().squeeze(0)
@@ -1039,7 +1040,7 @@ class Wan2_2_VAE:
         try:
             if not isinstance(zs, list):
                 raise TypeError("zs should be a list")
-            with amp.autocast(dtype=self.dtype):
+            with torch.amp.autocast(get_device_type(), dtype=self.dtype):
                 return [
                     self.model.decode(u.unsqueeze(0),
                                       self.scale).float().clamp_(-1,

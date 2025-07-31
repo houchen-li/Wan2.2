@@ -10,25 +10,33 @@ from contextlib import contextmanager
 from functools import partial
 
 import torch
-import torch.cuda.amp as amp
 import torch.distributed as dist
 import torchvision.transforms.functional as TF
+from torch.cuda import synchronize, empty_cache
 from PIL import Image
 from tqdm import tqdm
 
-from .distributed.fsdp import shard_model
-from .distributed.sequence_parallel import sp_attn_forward, sp_dit_forward
-from .distributed.util import get_world_size
-from .modules.model import WanModel
-from .modules.t5 import T5EncoderModel
-from .modules.vae2_2 import Wan2_2_VAE
-from .utils.fm_solvers import (
+try:
+    import torch_musa
+    from torch_musa.core.device import synchronize
+    from torch_musa.core.memory import empty_cache
+except ModuleNotFoundError:
+    torch_musa = None
+
+from wan.distributed.fsdp import shard_model
+from wan.distributed.sequence_parallel import sp_attn_forward, sp_dit_forward
+from wan.distributed.util import get_world_size
+from wan.modules.model import WanModel
+from wan.modules.t5 import T5EncoderModel
+from wan.modules.vae2_2 import Wan2_2_VAE
+from wan.utils.fm_solvers import (
     FlowDPMSolverMultistepScheduler,
     get_sampling_sigmas,
     retrieve_timesteps,
 )
-from .utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
-from .utils.utils import best_output_size, masks_like
+from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
+from wan.utils.utils import best_output_size, masks_like
+from wan.utils.platform import get_device, get_device_type
 
 
 class WanTI2V:
@@ -72,7 +80,7 @@ class WanTI2V:
                 Convert DiT model parameters dtype to 'config.param_dtype'.
                 Only works without FSDP.
         """
-        self.device = torch.device(f"cuda:{device_id}")
+        self.device = get_device(device_id)
         self.config = config
         self.rank = rank
         self.t5_cpu = t5_cpu
@@ -147,7 +155,8 @@ class WanTI2V:
             model.forward = types.MethodType(sp_dit_forward, model)
 
         if dist.is_initialized():
-            dist.barrier()
+            # dist.barrier() # FIXME
+            pass
 
         if dit_fsdp:
             model = shard_fn(model)
@@ -327,7 +336,7 @@ class WanTI2V:
 
         # evaluation mode
         with (
-                torch.amp.autocast('cuda', dtype=self.param_dtype),
+                torch.amp.autocast(get_device_type(), dtype=self.param_dtype),
                 torch.no_grad(),
                 no_sync(),
         ):
@@ -362,7 +371,7 @@ class WanTI2V:
 
             if offload_model or self.init_on_cpu:
                 self.model.to(self.device)
-                torch.cuda.empty_cache()
+                empty_cache()
 
             for _, t in enumerate(tqdm(timesteps)):
                 latent_model_input = latents
@@ -395,8 +404,8 @@ class WanTI2V:
             x0 = latents
             if offload_model:
                 self.model.cpu()
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
+                synchronize()
+                empty_cache()
             if self.rank == 0:
                 videos = self.vae.decode(x0)
 
@@ -404,9 +413,10 @@ class WanTI2V:
         del sample_scheduler
         if offload_model:
             gc.collect()
-            torch.cuda.synchronize()
+            synchronize()
         if dist.is_initialized():
-            dist.barrier()
+            # dist.barrier() # FIXME
+            pass
 
         return videos[0] if self.rank == 0 else None
 
@@ -519,7 +529,7 @@ class WanTI2V:
 
         # evaluation mode
         with (
-                torch.amp.autocast('cuda', dtype=self.param_dtype),
+                torch.amp.autocast(get_device_type(), dtype=self.param_dtype),
                 torch.no_grad(),
                 no_sync(),
         ):
@@ -562,7 +572,7 @@ class WanTI2V:
 
             if offload_model or self.init_on_cpu:
                 self.model.to(self.device)
-                torch.cuda.empty_cache()
+                empty_cache()
 
             for _, t in enumerate(tqdm(timesteps)):
                 latent_model_input = [latent.to(self.device)]
@@ -580,11 +590,11 @@ class WanTI2V:
                 noise_pred_cond = self.model(
                     latent_model_input, t=timestep, **arg_c)[0]
                 if offload_model:
-                    torch.cuda.empty_cache()
+                    empty_cache()
                 noise_pred_uncond = self.model(
                     latent_model_input, t=timestep, **arg_null)[0]
                 if offload_model:
-                    torch.cuda.empty_cache()
+                    empty_cache()
                 noise_pred = noise_pred_uncond + guide_scale * (
                     noise_pred_cond - noise_pred_uncond)
 
@@ -602,8 +612,8 @@ class WanTI2V:
 
             if offload_model:
                 self.model.cpu()
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
+                synchronize()
+                empty_cache()
 
             if self.rank == 0:
                 videos = self.vae.decode(x0)
@@ -612,8 +622,9 @@ class WanTI2V:
         del sample_scheduler
         if offload_model:
             gc.collect()
-            torch.cuda.synchronize()
+            synchronize()
         if dist.is_initialized():
-            dist.barrier()
+            # dist.barrier() # FIXME
+            pass
 
         return videos[0] if self.rank == 0 else None

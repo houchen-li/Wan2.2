@@ -6,8 +6,15 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.cuda import current_device
 
-from .tokenizers import HuggingfaceTokenizer
+try:
+    import torch_musa
+    from torch_musa.core.device import current_device
+except ModuleNotFoundError:
+    torch_musa = None
+
+from wan.modules.tokenizers import HuggingfaceTokenizer
 
 __all__ = [
     'T5Model',
@@ -475,7 +482,7 @@ class T5EncoderModel:
         self,
         text_len,
         dtype=torch.bfloat16,
-        device=torch.cuda.current_device(),
+        device=current_device(),
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,
