@@ -28,6 +28,7 @@ from wan.distributed.util import init_distributed_group
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import save_video, str2bool
 from wan.utils.platform import get_torch_distributed_backend
+from wan.utils.chrono_inspector import ChronoInspector
 
 EXAMPLE_PROMPT = {
     "t2v-A14B": {
@@ -324,6 +325,19 @@ def generate(args):
             convert_model_dtype=args.convert_model_dtype,
         )
 
+        logging.info("Warming up WanT2V pipeline ...")
+        with torch.no_grad():
+            _ = wan_t2v.generate(args.prompt,
+                size=SIZE_CONFIGS[args.size],
+                frame_num=args.frame_num,
+                shift=args.sample_shift,
+                sample_solver=args.sample_solver,
+                sampling_steps=3,
+                guide_scale=args.sample_guide_scale,
+                seed=args.base_seed,
+                offload_model=args.offload_model
+            )
+
         logging.info(f"Generating video ...")
         video = wan_t2v.generate(
             args.prompt,
@@ -334,7 +348,8 @@ def generate(args):
             sampling_steps=args.sample_steps,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model
+        )
     elif "ti2v" in args.task:
         logging.info("Creating WanTI2V pipeline.")
         wan_ti2v = wan.WanTI2V(
@@ -349,6 +364,22 @@ def generate(args):
             convert_model_dtype=args.convert_model_dtype,
         )
 
+        logging.info("Warming up WanTI2V pipeline ...")
+        with torch.no_grad():
+            _ = wan_ti2v.generate(
+                args.prompt,
+                img=img,
+                size=SIZE_CONFIGS[args.size],
+                max_area=MAX_AREA_CONFIGS[args.size],
+                frame_num=args.frame_num,
+                shift=args.sample_shift,
+                sample_solver=args.sample_solver,
+                sampling_steps=3,
+                guide_scale=args.sample_guide_scale,
+                seed=args.base_seed,
+                offload_model=args.offload_model
+            )
+
         logging.info(f"Generating video ...")
         video = wan_ti2v.generate(
             args.prompt,
@@ -361,7 +392,8 @@ def generate(args):
             sampling_steps=args.sample_steps,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model
+        )
     else:
         logging.info("Creating WanI2V pipeline.")
         wan_i2v = wan.WanI2V(
@@ -376,6 +408,21 @@ def generate(args):
             convert_model_dtype=args.convert_model_dtype,
         )
 
+        logging.info("Warming up WanI2V pipeline ...")
+        with torch.no_grad():
+            _ = wan_i2v.generate(
+                args.prompt,
+                img,
+                max_area=MAX_AREA_CONFIGS[args.size],
+                frame_num=args.frame_num,
+                shift=args.sample_shift,
+                sample_solver=args.sample_solver,
+                sampling_steps=3,
+                guide_scale=args.sample_guide_scale,
+                seed=args.base_seed,
+                offload_model=args.offload_model
+            )
+
         logging.info("Generating video ...")
         video = wan_i2v.generate(
             args.prompt,
@@ -387,7 +434,8 @@ def generate(args):
             sampling_steps=args.sample_steps,
             guide_scale=args.sample_guide_scale,
             seed=args.base_seed,
-            offload_model=args.offload_model)
+            offload_model=args.offload_model
+        )
 
     if rank == 0:
         if args.save_file is None:
@@ -404,7 +452,8 @@ def generate(args):
             fps=cfg.sample_fps,
             nrow=1,
             normalize=True,
-            value_range=(-1, 1))
+            value_range=(-1, 1)
+        )
     del video
 
     synchronize()
@@ -417,7 +466,4 @@ def generate(args):
 
 if __name__ == "__main__":
     args = _parse_args()
-    start_time = perf_counter()
     generate(args)
-    end_time = perf_counter()
-    logging.info(f"Task running took {end_time-start_time:.2f} seconds.")
