@@ -168,7 +168,8 @@ class WanI2V:
             model.forward = types.MethodType(sp_dit_forward, model)
 
         if dist.is_initialized():
-            # dist.barrier() # FIXME
+            # TODO(Houchen Li): calling dist.barrier() may result in throwing MCCL errors.
+            # dist.barrier()
             pass
 
         if dit_fsdp:
@@ -438,7 +439,8 @@ class WanI2V:
             gc.collect()
             synchronize()
         if dist.is_initialized():
-            # dist.barrier() # FIXME
+            # TODO(Houchen Li): calling dist.barrier() may result in throwing MCCL errors.
+            # dist.barrier()
             pass
 
         return videos[0] if self.rank == 0 else None
