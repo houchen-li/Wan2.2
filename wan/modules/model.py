@@ -7,6 +7,7 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
 from wan.modules.attention import flash_attention
+from wan.modules.rope import rope_apply_pytorch
 from wan.utils.platform import get_device_type
 
 try:
@@ -109,55 +110,6 @@ def rope_apply(x, grid_sizes, freqs):
     return torch.stack(output).float()
 
 
-@torch.amp.autocast(get_device_type(), enabled=False)
-def rope_apply_musa(x, grid_sizes, freqs):
-    n, c = x.size(2), x.size(3) // 2
-    c0 = c - 2 * (c // 3)
-    c1 = c // 3
-    c2 = c // 3
-
-    # split freqs
-    freqs_real = freqs[0].split([c0, c1, c2], dim=1)
-    freqs_imag = freqs[-1].split([c0, c1, c2], dim=1)
-
-    # loop over samples
-    output = []
-    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-        seq_len = f * h * w
-
-        # precompute multipliers
-        x_i = x[i, :seq_len].reshape(seq_len, n, c, 2)
-        x_real = x_i[..., 0]
-        x_imag = x_i[..., 1]
-        freqs_real = torch.cat(
-            [
-                freqs_real[0][:f].view(f, 1, 1, c0).expand(f, h, w, c0),
-                freqs_real[1][:h].view(1, h, 1, c1).expand(f, h, w, c1),
-                freqs_real[2][:w].view(1, 1, w, c2).expand(f, h, w, c2),
-            ],
-            dim=-1,
-        ).reshape(seq_len, 1, c)
-        freqs_imag = torch.cat(
-            [
-                freqs_imag[0][:f].view(f, 1, 1, c0).expand(f, h, w, c0),
-                freqs_imag[1][:h].view(1, h, 1, c1).expand(f, h, w, c1),
-                freqs_imag[2][:w].view(1, 1, w, c2).expand(f, h, w, c2),
-            ],
-            dim=-1,
-        ).reshape(seq_len, 1, c)
-
-        out_real = x_real * freqs_real - x_imag * freqs_imag
-        out_imag = x_real * freqs_imag + x_imag * freqs_real
-
-        # apply rotary embedding
-        x_out = torch.stack([out_real, out_imag], dim=-1).flatten(2)
-        x_out = torch.cat([x_out, x[i, seq_len:]], dim=0)
-
-        # append to collection
-        output.append(x_out)
-    return torch.stack(output)
-
-
 class WanRMSNorm(nn.Module):
 
     def __init__(self, dim, eps=1e-5):
@@ -171,7 +123,9 @@ class WanRMSNorm(nn.Module):
         Args:
             x(Tensor): Shape [B, L, C]
         """
-        return self._norm(x.float()).type_as(x) * self.weight
+        if self.weight.dtype != x.dtype or self.weight.device != x.device:
+            self.weight = nn.Parameter(self.weight.to(dtype=x.dtype, device=x.device))
+        return nn.functional.rms_norm(x, (self.dim, ), self.weight, self.eps)
 
     def _norm(self, x):
         return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
@@ -237,8 +191,8 @@ class WanSelfAttention(nn.Module):
             q = rope_apply(q, grid_sizes, freqs)
             k = rope_apply(k, grid_sizes, freqs)
         else:
-            q = rope_apply_musa(q, grid_sizes, freqs)
-            k = rope_apply_musa(k, grid_sizes, freqs)
+            q = rope_apply_pytorch(q, grid_sizes, freqs)
+            k = rope_apply_pytorch(k, grid_sizes, freqs)
 
         x = flash_attention(
             q=q,
