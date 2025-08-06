@@ -1,6 +1,7 @@
 from time import perf_counter
 from logging import info
 
+
 class ChronoInspector(object):
     def __init__(self, name:str="Block"):
         self.name = name
