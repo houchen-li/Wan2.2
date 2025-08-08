@@ -55,6 +55,7 @@ class WanTI2V:
         t5_cpu=False,
         init_on_cpu=True,
         convert_model_dtype=False,
+        profiler=None,
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -125,6 +126,7 @@ class WanTI2V:
             self.sp_size = 1
 
         self.sample_neg_prompt = config.sample_neg_prompt
+        self.profiler = profiler
 
     def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,
                          convert_model_dtype):
@@ -378,6 +380,9 @@ class WanTI2V:
                 empty_cache()
 
             for _, t in enumerate(tqdm(timesteps)):
+                if self.profiler and self.rank == 0:
+                    self.profiler.step()
+
                 latent_model_input = latents
                 timestep = [t]
 
@@ -405,6 +410,7 @@ class WanTI2V:
                     return_dict=False,
                     generator=seed_g)[0]
                 latents = [temp_x0.squeeze(0)]
+
             x0 = latents
             if offload_model:
                 self.model.cpu()
@@ -580,6 +586,9 @@ class WanTI2V:
                 empty_cache()
 
             for _, t in enumerate(tqdm(timesteps)):
+                if self.profiler and self.rank == 0:
+                    self.profiler.step()
+
                 latent_model_input = [latent.to(self.device)]
                 timestep = [t]
 
@@ -612,8 +621,8 @@ class WanTI2V:
                 latent = temp_x0.squeeze(0)
                 latent = (1. - mask2[0]) * z[0] + mask2[0] * latent
 
-                x0 = [latent]
-                del latent_model_input, timestep
+            x0 = [latent]
+            del latent_model_input, timestep
 
             if offload_model:
                 self.model.cpu()

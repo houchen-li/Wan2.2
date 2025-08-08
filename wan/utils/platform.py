@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 
 import torch
 
@@ -8,7 +8,7 @@ except ModuleNotFoundError:
     torch_musa = None
 
 
-def _is_musa():
+def _is_musa() -> bool:
     if torch_musa is None:
         return False
     else:
@@ -47,6 +47,23 @@ def get_torch_distributed_backend() -> str:
     elif _is_musa():
         return "mccl"
     else:
-        raise NotImplementedError(
-            "No Accelerators(NV/MTT GPU) available"
-        )
+        raise NotImplementedError("No Accelerators(NV/MTT GPU) available")
+
+
+def get_torch_profiler_activities() -> List[torch.profiler.ProfilerActivity]:
+    activities: List[torch.profiler.ProfilerActivity] = [
+        torch.profiler.ProfilerActivity.CPU
+    ]
+    if torch.cuda.is_available():
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+    elif _is_musa():
+        activities.append(torch.profiler.ProfilerActivity.MUSA)
+    return activities
+
+
+__all__ = [
+    "get_device",
+    "get_device_type",
+    "get_torch_distributed_backend",
+    "get_torch_profiler_activities",
+]

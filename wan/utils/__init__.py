@@ -5,7 +5,12 @@ from .fm_solvers import (
     retrieve_timesteps,
 )
 from .fm_solvers_unipc import FlowUniPCMultistepScheduler
-from .platform import get_device, get_device_type, get_torch_distributed_backend
+from .platform import (
+    get_device,
+    get_device_type,
+    get_torch_distributed_backend,
+    get_torch_profiler_activities,
+)
 from .memory_format import convert_conv3d_weight_memory_format
 from .chrono_inspector import ChronoInspector
 
@@ -13,5 +18,6 @@ __all__ = [
     'HuggingfaceTokenizer', 'get_sampling_sigmas', 'retrieve_timesteps',
     'FlowDPMSolverMultistepScheduler', 'FlowUniPCMultistepScheduler',
     'get_device', 'get_device_type', 'get_torch_distributed_backend',
-    'convert_conv3d_weight_memory_format', 'ChronoInspector'
+    'get_torch_profiler_activities','convert_conv3d_weight_memory_format',
+    'ChronoInspector'
 ]
