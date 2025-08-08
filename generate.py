@@ -27,8 +27,11 @@ from wan.configs import MAX_AREA_CONFIGS, SIZE_CONFIGS, SUPPORTED_SIZES, WAN_CON
 from wan.distributed.util import init_distributed_group
 from wan.utils.prompt_extend import DashScopePromptExpander, QwenPromptExpander
 from wan.utils.utils import save_video, str2bool
-from wan.utils.platform import get_torch_distributed_backend
-from wan.utils.chrono_inspector import ChronoInspector
+from wan.utils.platform import (
+    get_device_type,
+    get_torch_distributed_backend,
+    get_torch_profiler_activities,
+)
 
 EXAMPLE_PROMPT = {
     "t2v-A14B": {
@@ -203,6 +206,12 @@ def _parse_args():
         action="store_true",
         default=False,
         help="Whether to convert model paramerters dtype.")
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        default=False,
+        help="profile the generating procedure."
+    )
 
     args = parser.parse_args()
 
@@ -221,6 +230,26 @@ def _init_logging(rank):
             handlers=[logging.StreamHandler(stream=sys.stdout)])
     else:
         logging.basicConfig(level=logging.ERROR)
+
+
+def _init_profiler():
+    return torch.profiler.profile(
+        activities=get_torch_profiler_activities(),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler('./logs'),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+    )
+
+
+def _finalize_profiler(profiler):
+    profiler.stop()
+    table = profiler.key_averages().table(
+        sort_by=f"{get_device_type()}_time_total",
+        row_limit=20,
+    )
+    with open(f"logs/{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}-profiling.txt", "w") as f:
+        f.write(table)
 
 
 def generate(args):
@@ -311,6 +340,10 @@ def generate(args):
         args.prompt = input_prompt[0]
         logging.info(f"Extended prompt: {args.prompt}")
 
+    profiler = None
+    if args.profile and rank == 0:
+        profiler = _init_profiler()
+
     if "t2v" in args.task:
         logging.info("Creating WanT2V pipeline.")
         wan_t2v = wan.WanT2V(
@@ -323,6 +356,7 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            profiler=profiler,
         )
 
         logging.info("Warming up WanT2V pipeline ...")
@@ -362,6 +396,7 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            profiler=profiler,
         )
 
         logging.info("Warming up WanTI2V pipeline ...")
@@ -406,6 +441,7 @@ def generate(args):
             use_sp=(args.ulysses_size > 1),
             t5_cpu=args.t5_cpu,
             convert_model_dtype=args.convert_model_dtype,
+            profiler=profiler,
         )
 
         logging.info("Warming up WanI2V pipeline ...")
@@ -436,6 +472,9 @@ def generate(args):
             seed=args.base_seed,
             offload_model=args.offload_model
         )
+
+    if args.profile and rank == 0:
+        _finalize_profiler(profiler)
 
     if rank == 0:
         if args.save_file is None:

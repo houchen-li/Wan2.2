@@ -6,6 +6,7 @@ import os
 import random
 import sys
 import types
+from time import perf_counter
 from contextlib import contextmanager
 from functools import partial
 
@@ -54,6 +55,7 @@ class WanI2V:
         t5_cpu=False,
         init_on_cpu=True,
         convert_model_dtype=False,
+        profiler=None,
     ):
         r"""
         Initializes the image-to-video generation model components.
@@ -135,6 +137,7 @@ class WanI2V:
             self.sp_size = 1
 
         self.sample_neg_prompt = config.sample_neg_prompt
+        self.profiler = profiler
 
     def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,
                          convert_model_dtype):
@@ -264,7 +267,15 @@ class WanI2V:
                 - N: Number of frames (81)
                 - H: Frame height (from max_area)
                 - W: Frame width from max_area)
-        """
+        """ 
+        if self.profiler and self.rank == 0:
+            self.profiler.start()
+
+        start_time = 0.0
+        end_time = 0.0
+        if self.rank == 0:
+            start_time = perf_counter()
+
         # preprocess
         guide_scale = (guide_scale, guide_scale) if isinstance(
             guide_scale, float) else guide_scale
@@ -334,6 +345,10 @@ class WanI2V:
         ])[0]
         y = torch.concat([msk, y])
 
+        if self.rank == 0:
+            end_time = perf_counter()
+            logging.info(f"[preprocess and VAE encode] Elapsed time: {end_time - start_time:.2f} seconds")
+
         @contextmanager
         def noop_no_sync():
             yield
@@ -391,7 +406,13 @@ class WanI2V:
             if offload_model:
                 empty_cache()
 
+            if self.rank == 0:
+                start_time = perf_counter()
+
             for _, t in enumerate(tqdm(timesteps)):
+                if self.profiler and self.rank == 0:
+                    self.profiler.step()
+
                 latent_model_input = [latent.to(self.device)]
                 timestep = [t]
 
@@ -421,8 +442,12 @@ class WanI2V:
                     generator=seed_g)[0]
                 latent = temp_x0.squeeze(0)
 
-                x0 = [latent]
-                del latent_model_input, timestep
+            if self.rank == 0:
+                end_time = perf_counter()
+                logging.info(f"[sampling time steps] Elapsed time: {end_time - start_time:.2f} seconds")
+
+            x0 = [latent]
+            del latent_model_input, timestep
 
             if offload_model:
                 self.low_noise_model.cpu()
@@ -430,7 +455,10 @@ class WanI2V:
                 empty_cache()
 
             if self.rank == 0:
+                start_time = perf_counter()
                 videos = self.vae.decode(x0)
+                end_time = perf_counter()
+                logging.info(f"[VAE decoding] Elapsed time: {end_time - start_time:.2f} seconds")
 
         del noise, latent, x0
         del sample_scheduler

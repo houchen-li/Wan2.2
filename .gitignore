@@ -1,2 +1,8 @@
 __pycache__/
 .DS_Store
+
+logs/
+
+*cache/
+
+.vscode/

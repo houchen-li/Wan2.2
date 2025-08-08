@@ -6,6 +6,7 @@ import os
 import random
 import sys
 import types
+from time import perf_counter
 from contextlib import contextmanager
 from functools import partial
 
@@ -55,6 +56,7 @@ class WanTI2V:
         t5_cpu=False,
         init_on_cpu=True,
         convert_model_dtype=False,
+        profiler=None,
     ):
         r"""
         Initializes the Wan text-to-video generation model components.
@@ -125,6 +127,7 @@ class WanTI2V:
             self.sp_size = 1
 
         self.sample_neg_prompt = config.sample_neg_prompt
+        self.profiler = profiler
 
     def _configure_model(self, model, use_sp, dit_fsdp, shard_fn,
                          convert_model_dtype):
@@ -292,6 +295,14 @@ class WanTI2V:
                 - H: Frame height (from size)
                 - W: Frame width from size)
         """
+        if self.profiler and self.rank == 0:
+            self.profiler.start()
+
+        start_time = 0.0
+        end_time = 0.0
+        if self.rank == 0:
+            start_time = perf_counter()
+
         # preprocess
         F = frame_num
         target_shape = (self.vae.model.z_dim, (F - 1) // self.vae_stride[0] + 1,
@@ -330,6 +341,10 @@ class WanTI2V:
                 device=self.device,
                 generator=seed_g)
         ]
+
+        if self.rank == 0:
+            end_time = perf_counter()
+            logging.info(f"[preprocess] Elapsed time: {end_time - start_time:.2f} seconds")
 
         @contextmanager
         def noop_no_sync():
@@ -376,7 +391,13 @@ class WanTI2V:
                 self.model.to(self.device)
                 empty_cache()
 
+            if self.rank == 0:
+                start_time = perf_counter()
+
             for _, t in enumerate(tqdm(timesteps)):
+                if self.profiler and self.rank == 0:
+                    self.profiler.step()
+
                 latent_model_input = latents
                 timestep = [t]
 
@@ -404,13 +425,21 @@ class WanTI2V:
                     return_dict=False,
                     generator=seed_g)[0]
                 latents = [temp_x0.squeeze(0)]
+
+            if self.rank == 0:
+                end_time = perf_counter()
+                logging.info(f"[sampling time steps] Elapsed time: {end_time - start_time:.2f} seconds")
+
             x0 = latents
             if offload_model:
                 self.model.cpu()
                 synchronize()
                 empty_cache()
             if self.rank == 0:
+                start_time = perf_counter()
                 videos = self.vae.decode(x0)
+                end_time = perf_counter()
+                logging.info(f"[VAE decoding] Elapsed time: {end_time - start_time:.2f} seconds")
 
         del noise, latents
         del sample_scheduler
@@ -471,6 +500,14 @@ class WanTI2V:
                 - H: Frame height (from max_area)
                 - W: Frame width (from max_area)
         """
+        if self.profiler and self.rank == 0:
+            self.profiler.start()
+
+        start_time = 0.0
+        end_time = 0.0
+        if self.rank == 0:
+            start_time = perf_counter()
+
         # preprocess
         ih, iw = img.height, img.width
         dh, dw = self.patch_size[1] * self.vae_stride[1], self.patch_size[
@@ -523,6 +560,10 @@ class WanTI2V:
             context_null = [t.to(self.device) for t in context_null]
 
         z = self.vae.encode([img])
+
+        if self.rank == 0:
+            end_time = perf_counter()
+            logging.info(f"[preprocess and VAE encode] Elapsed time: {end_time - start_time:.2f} seconds")
 
         @contextmanager
         def noop_no_sync():
@@ -577,7 +618,13 @@ class WanTI2V:
                 self.model.to(self.device)
                 empty_cache()
 
+            if self.rank == 0:
+                start_time = perf_counter()
+
             for _, t in enumerate(tqdm(timesteps)):
+                if self.profiler and self.rank == 0:
+                    self.profiler.step()
+
                 latent_model_input = [latent.to(self.device)]
                 timestep = [t]
 
@@ -610,7 +657,11 @@ class WanTI2V:
                 latent = temp_x0.squeeze(0)
                 latent = (1. - mask2[0]) * z[0] + mask2[0] * latent
 
-                x0 = [latent]
+            if self.rank == 0:
+                end_time = perf_counter()
+                logging.info(f"[sampling time steps] Elapsed time: {end_time - start_time:.2f} seconds")
+
+            x0 = [latent]
                 del latent_model_input, timestep
 
             if offload_model:
@@ -619,7 +670,10 @@ class WanTI2V:
                 empty_cache()
 
             if self.rank == 0:
+                start_time = perf_counter()
                 videos = self.vae.decode(x0)
+                end_time = perf_counter()
+                logging.info(f"[VAE decoding] Elapsed time: {end_time - start_time:.2f} seconds")
 
         del noise, latent, x0
         del sample_scheduler
